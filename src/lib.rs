@@ -2,29 +2,55 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-//! A crate for reading RIFF files.
+//! A crate for reading RIFF-formatted data.
 //!
 //! Primarily designed for `no_std` targets, as no APIs from `std::io` are used
 //! and an attempt is made to avoid needless copying to save RAM.
 
 use core::convert::TryInto;
+use core::fmt;
 use core::str;
 use core::u32;
 
-/// A wrapper around an underlying RIFF-formatted data pool,
+/// A wrapper around an underlying RIFF-formatted byte slice,
 /// which allows for reading Chunks from that pool.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct RiffReader<'a> {
-    data: &'a [u8], // Underlying RIFF-encoded data pool
-    pos: usize,     // Index of next byte in the data pool that should be read
+    data: &'a [u8], // Underlying RIFF-encoded byte slice
+    pos: usize,     // Index of next byte in the byte slice that should be read
 }
 
 /// RiffError is returned when invalid data is encountered or an end-of-underlying-data-pool is reached.
-#[derive(Debug)]
-pub struct RiffError {}
+#[derive(Debug, PartialEq)]
+pub enum RiffError {
+    /// Non-ASCII ID was encountered at the given position in the underlying byte slice
+    EncounteredInvalidIDNotASCII(usize),
+    /// Non-ASCII ID was provided by the consumer
+    InvalidIDNotASCII,
+    /// Expected end of byte slice reached
+    EndOfData,
+    /// Unexpected end of byte slice reached (chunk length is greater than remaining number of bytes)
+    UnexpectedEndOfData(usize, u32, usize),
+}
+
+impl fmt::Display for RiffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use RiffError::*;
+        match self {
+            EncounteredInvalidIDNotASCII(pos) => write!(
+                f,
+                "ID at position {} in the underlying byte slice is not valid ASCII",
+                pos
+            ),
+            InvalidIDNotASCII => write!(f, "Supplied ID is not valid ASCII"),
+            EndOfData => write!(f, "End of the underlying byte slice reached"),
+            UnexpectedEndOfData(len_pos, expected, have) => write!(f, "Expected {} bytes of data based on the index at position {}, however only {} are left", expected, len_pos, have),
+        }
+    }
+}
 
 /// A RIFF chunk.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Chunk<'a> {
     /// The actual payload data of the chunk
     pub data: &'a [u8],
@@ -37,28 +63,26 @@ pub struct Chunk<'a> {
 /// TODO: Implement turing Chunk into RiffReader for recursion-capable chunks
 
 /// The ID of a RIFF chunk.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ChunkId {
     id: [u8; 4],
 }
 
 impl ChunkId {
     /// Convert a 4 character str from ASCII to a `ChunkId`.
-    /// Note that the str must be exactly 4 ASCII characters.
+    /// Because it's not possible to elegantly enforce the length of a str through the type system,
+    /// the string must be provided as a 4-element byte array representing ASCII characters instead.
     ///
     /// # Errors
     ///
-    /// This function errors when the str is not 4 characters long, or not all characters are valid ASCII.
-    pub fn from_ascii(id: &str) -> Result<ChunkId, RiffError> {
-        if id.len() != 4 {
-            return Err(RiffError {});
-        }
+    /// This function errors when not all bytes are valid ASCII characters.
+    pub fn from_ascii(id: [u8; 4]) -> Result<ChunkId, RiffError> {
         if !id.is_ascii() {
-            return Err(RiffError {});
+            return Err(RiffError::InvalidIDNotASCII);
         }
         return Ok(ChunkId {
             // Never panics, as the length was checked beforehand
-            id: id.as_bytes().try_into().unwrap(),
+            id: id,
         });
     }
 
@@ -70,84 +94,159 @@ impl ChunkId {
 }
 
 impl RiffReader<'_> {
-    /// Creates a new `RiffReader` over an underlying data pool.
+    /// Creates a new `RiffReader` over an underlying byte slice.
     ///
     /// Note that this function does not ensure that the underlying pool is valid RIFF data.
     pub fn new(data: &[u8]) -> RiffReader {
         return RiffReader { data: data, pos: 0 };
     }
-    /// Reads the next chunk out of the underlying data pool.
+    /// Reads the next chunk out of the underlying byte slice.
     ///
-    /// Returns an error if the underlying data pool is exhausted or invalid data is encountered.
+    /// Returns an error if the underlying byte slice is exhausted or invalid data is encountered.
     ///
     /// For efficiency reasons, the returned `Chunk` contains a reference to the data rather than a copy,
     /// meaning that it cannot live longer than the originating `RiffReader`.
+    ///
+    /// This may be turned into an iterator in the future, once the `Item` type of an `Iterator`
+    /// can have an explicit lifetime.
     pub fn read_next_chunk(&mut self) -> Result<Chunk, RiffError> {
-        // Roughly, a RIFF file consists of a bunch of chunks,
-        // and each chunk consists of a 4 byte ID, 4 byte length to be interpreted as `u32`, and data following which is len bytes in size.
+        let (new_pos, result) = read_chunk_at(self.data, self.pos);
+        // Move to next chunk for next call
+        self.pos = new_pos;
 
-        // Therefore, at least 8 bytes have to be left in the underlying pool for a correct block to exist
-        if (self.data.len() - self.pos) < 8 {
-            return Err(RiffError {});
-        }
-        // Read the ID
-        let id = ChunkId::from_ascii(self.read_next_id()?)?;
-        // Read the length
-        // TODO: Return error if conversion fails instead of panicking
-        let len: usize = self.read_next_len()?.try_into().unwrap();
-        // Read len data bytes
-        let data = self.read_next_data(len)?;
-        return Ok(Chunk { data, id, len });
-    }
-
-    fn read_next_id(&mut self) -> Result<&str, RiffError> {
-        // Check whether we can actually read as much in order to prevent a runtime panic due to OOB index
-        if (self.data.len() - self.pos) < 4 {
-            return Err(RiffError {});
-        }
-        let as_bytes = &self.data[self.pos..(self.pos + 4)];
-        self.pos = self.pos + 4;
-        // ID must be valid ASCII
-        if !as_bytes.is_ascii() {
-            return Err(RiffError {});
-        }
-        // Will never panic, as UTF-8 is strict superset of ASCII
-        return Ok(str::from_utf8(as_bytes).unwrap());
-    }
-
-    fn read_next_len(&mut self) -> Result<u32, RiffError> {
-        // Check whether we can actually read as much in order to prevent a runtime panic due to OOB index
-        if (self.data.len() - self.pos) < 4 {
-            return Err(RiffError {});
-        }
-        let len_as_bytes = &self.data[self.pos..(self.pos + 4)];
-        // This panic will never happen, as we have obtained a subslice of length 4 in previous step
-        let len = u32::from_le_bytes(len_as_bytes.try_into().unwrap());
-        return Ok(len);
-    }
-
-    fn read_next_data(&mut self, len: usize) -> Result<&[u8], RiffError> {
-        // Check whether remainder of backing data pool is large enough
-        if self.data.len() <= (self.pos + len) {
-            // Note that a padding byte is added if len is odd, meaning we have to advance the position by 1 extra.
-            if (len % 2) != 0 {
-                self.pos = self.pos + len + 1;
-            } else {
-                self.pos = self.pos + len;
-            }
-            return Ok(&self.data[self.pos..(self.pos + len)]);
-        }
-
-        return Err(RiffError {});
+        return result;
     }
 
     /// Returns the chunk with the given ID, if present.
     /// If not present, returns `None`.
     /// Note that this does not recurse into chunks that can contain other chunks.
-    pub fn read_chunk(&self, chunk: ChunkId) -> Option<Result<Chunk, RiffError>> {
-        // TODO: Implement
-        return None;
+    pub fn get_chunk(&self, wanted_id: ChunkId) -> Option<Result<Chunk, RiffError>> {
+        // TODO: Clean this up so we don't need a mutable reference
+        // Iterate over each chunk until either a matching ID or end of data is encountered
+        let mut pos: usize = 0;
+        loop {
+            let (new_pos, result) = read_chunk_at(self.data, pos);
+            match result {
+                Ok(chunk) => {
+                    if chunk.id == wanted_id {
+                        return Some(Ok(chunk));
+                    }
+                }
+                Err(err) => match err {
+                    // Exhausted without having found a matching chunk
+                    RiffError::EndOfData => {
+                        return None;
+                    }
+                    // Other errors are unexpected
+                    _ => {
+                        return Some(Err(err));
+                    }
+                },
+            }
+            pos = new_pos;
+        }
     }
 }
 
-// TODO: impl IntoIterator for RiffReader
+/// Read the chunk starting at byte pos, and also return the position of the next block.
+fn read_chunk_at(data: &[u8], pos: usize) -> (usize, Result<Chunk, RiffError>) {
+    // Roughly, a RIFF file consists of a bunch of chunks,
+    // and each chunk consists of a 4 byte ID, 4 byte length to be interpreted as `u32`, and data following which is len bytes in size.
+
+    // Therefore, at least 8 bytes have to be left in the underlying pool for a correct block to exist
+    if (data.len() - pos) < 8 {
+        return (pos, Err(RiffError::EndOfData));
+    }
+    // Read the ID
+    let id_as_ascii: [u8; 4];
+    let mut pos = pos;
+    match read_id_at(data, pos) {
+        (new_pos, Ok(val)) => {
+            pos = new_pos;
+            id_as_ascii = val;
+        }
+        (new_pos, Err(err)) => return (new_pos, Err(err)),
+    };
+
+    let id = ChunkId::from_ascii(id_as_ascii).unwrap();
+
+    // Read the length
+    let len: usize;
+    match read_len_at(data, pos) {
+        // TODO: Return error if conversion fails instead of panicking
+        (new_pos, Ok(val)) => {
+            pos = new_pos;
+            len = val.try_into().unwrap();
+        }
+        (pos, Err(err)) => return (pos, Err(err)),
+    }
+    // Read len data bytes
+    let payload_data: &[u8];
+    match read_data_at(data, pos, len) {
+        (new_pos, Ok(val)) => {
+            pos = new_pos;
+            payload_data = val;
+        }
+        (new_pos, Err(err)) => return (new_pos, Err(err)),
+    }
+    return (
+        pos,
+        Ok(Chunk {
+            data: payload_data,
+            id,
+            len,
+        }),
+    );
+}
+
+fn read_id_at(data: &[u8], pos: usize) -> (usize, Result<[u8; 4], RiffError>) {
+    let mut pos = pos;
+    // Check whether we can actually read as much in order to prevent a runtime panic due to OOB index
+    if (data.len() - pos) < 4 {
+        return (pos, Err(RiffError::EndOfData));
+    }
+    let as_bytes = &data[pos..(pos + 4)];
+    pos += 4;
+    // ID must be valid ASCII
+    if !as_bytes.is_ascii() {
+        return (pos, Err(RiffError::EncounteredInvalidIDNotASCII(pos)));
+    }
+    // Will never panic, as length was checked above
+    return (pos, Ok(as_bytes.try_into().unwrap()));
+}
+
+fn read_len_at(data: &[u8], pos: usize) -> (usize, Result<u32, RiffError>) {
+    let mut pos = pos;
+    // Check whether we can actually read as much in order to prevent a runtime panic due to OOB index
+    if (data.len() - pos) < 4 {
+        return (pos, Err(RiffError::EndOfData));
+    }
+    let len_as_bytes = &data[pos..(pos + 4)];
+    // This panic will never happen, as we have obtained a subslice of length 4 in previous step
+    let len = u32::from_le_bytes(len_as_bytes.try_into().unwrap());
+    pos += 4;
+    return (pos, Ok(len));
+}
+
+fn read_data_at(data: &[u8], pos: usize, len: usize) -> (usize, Result<&[u8], RiffError>) {
+    let mut pos = pos;
+    // Check whether remainder of backing byte slice is large enough
+    if data.len() <= (pos + len) {
+        // Note that a padding byte is added if len is odd, meaning we have to advance the position by 1 extra.
+        if (len % 2) != 0 {
+            pos = pos + len + 1;
+        } else {
+            pos = pos + len;
+        }
+        return (pos, Ok(&data[pos..(pos + len)]));
+    }
+
+    return (
+        pos,
+        Err(RiffError::UnexpectedEndOfData(
+            pos - 4,
+            len.try_into().unwrap(),
+            data.len() - (pos + len),
+        )),
+    );
+}
