@@ -14,14 +14,14 @@ use core::u32;
 
 /// A wrapper around an underlying RIFF-formatted byte slice,
 /// which allows for reading Chunks from that pool.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct RiffReader<'a> {
     data: &'a [u8], // Underlying RIFF-encoded byte slice
     pos: usize,     // Index of next byte in the byte slice that should be read
 }
 
 /// RiffError is returned when invalid data is encountered or an end-of-underlying-data-pool is reached.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum RiffError {
     /// Non-ASCII ID was encountered at the given position in the underlying byte slice
     EncounteredInvalidIDNotASCII(usize),
@@ -50,7 +50,7 @@ impl fmt::Display for RiffError {
 }
 
 /// A RIFF chunk.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Chunk<'a> {
     /// The actual payload data of the chunk
     pub data: &'a [u8],
@@ -63,7 +63,7 @@ pub struct Chunk<'a> {
 /// TODO: Implement turing Chunk into RiffReader for recursion-capable chunks
 
 /// The ID of a RIFF chunk.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct ChunkId {
     id: [u8; 4],
 }
@@ -232,19 +232,20 @@ fn read_data_at(data: &[u8], pos: usize, len: usize) -> (usize, Result<&[u8], Ri
     let mut pos = pos;
     // Check whether remainder of backing byte slice is large enough
     if data.len() <= (pos + len) {
+        let retval = Ok(&data[pos..(pos + len)]);
+        pos += len;
         // Note that a padding byte is added if len is odd, meaning we have to advance the position by 1 extra.
         if (len % 2) != 0 {
-            pos = pos + len + 1;
-        } else {
-            pos = pos + len;
+            pos += 1;
         }
-        return (pos, Ok(&data[pos..(pos + len)]));
+        return (pos, retval);
     }
 
+    // If not, that means we encountered an unexpected end of data
     return (
         pos,
         Err(RiffError::UnexpectedEndOfData(
-            pos - 4,
+            pos - 4, // To get to starting index of length specifier
             len.try_into().unwrap(),
             data.len() - (pos + len),
         )),
