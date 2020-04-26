@@ -93,11 +93,11 @@ impl ChunkId {
     }
 }
 
-impl RiffReader<'_> {
+impl<'a> RiffReader<'a> {
     /// Creates a new `RiffReader` over an underlying byte slice.
     ///
     /// Note that this function does not ensure that the underlying pool is valid RIFF data.
-    pub fn new(data: &[u8]) -> RiffReader {
+    pub fn new(data: &'a [u8]) -> RiffReader {
         return RiffReader { data: data, pos: 0 };
     }
     /// Reads the next chunk out of the underlying byte slice.
