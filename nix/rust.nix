@@ -3,13 +3,13 @@
 let
   pkgs =
     import sources.nixpkgs { overlays = [ (import sources.nixpkgs-mozilla) ]; };
-  channel = "nightly";
-  date = "2020-04-18";
+  channel = "stable";
+  version = "1.43.0";
   targets = [ ];
   extensions = [ "rust-src" "rls-preview" "rust-analysis" "rustfmt-preview" ];
-  rustChannelOfTargetsAndExtensions = channel: date: targets: extensions:
-    (pkgs.rustChannelOf { inherit channel date; }).rust.override {
+  rustChannelOfTargetsAndExtensions = channel: version: targets: extensions:
+    (pkgs.rustChannelOf { inherit channel version; }).rust.override {
       inherit targets extensions;
     };
-  chan = rustChannelOfTargetsAndExtensions channel date targets extensions;
+  chan = rustChannelOfTargetsAndExtensions channel version targets extensions;
 in chan
