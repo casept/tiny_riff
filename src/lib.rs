@@ -12,6 +12,15 @@ use core::fmt;
 use core::str;
 use core::u32;
 
+/// The `RIFF` id
+pub static RIFF_ID: ChunkId = ChunkId { id: [0x52, 0x49, 0x46, 0x46] };
+
+/// The `LIST` id
+pub static LIST_ID: ChunkId = ChunkId { id: [0x4C, 0x49, 0x53, 0x54] };
+
+/// The `seqt` id
+pub static SEQT_ID: ChunkId = ChunkId { id: [0x73, 0x65, 0x71, 0x74] };
+ 
 /// A wrapper around an underlying RIFF-formatted byte slice,
 /// which allows for reading Chunks from that pool.
 #[derive(Debug, PartialEq, Clone)]
@@ -60,6 +69,19 @@ pub struct Chunk<'a> {
     pub len: usize,
 }
 
+impl<'a> Chunk<'a> {
+    /// Determines whether the Chunk has subchunks based on it's ID.
+    ///
+    /// According to the spec, chunks with the IDs `RIFF`, `LIST` or `seqt` are containers for
+    /// subchunks.
+    pub fn has_subchunks(&self) -> bool {
+        if self.id == RIFF_ID || self.id == LIST_ID || self.id == SEQT_ID {
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
 /// TODO: Implement turing Chunk into RiffReader for recursion-capable chunks
 
 /// The ID of a RIFF chunk.
@@ -231,9 +253,10 @@ fn read_len_at(data: &[u8], pos: usize) -> (usize, Result<u32, RiffError>) {
 fn read_data_at(data: &[u8], pos: usize, len: usize) -> (usize, Result<&[u8], RiffError>) {
     let mut pos = pos;
     // Check whether remainder of backing byte slice is large enough
-    if data.len() <= (pos + len) {
-        let retval = Ok(&data[pos..(pos + len)]);
-        pos += len;
+    let expected_len = pos + len;
+    if data.len() >= expected_len {
+        let retval = Ok(&data[pos..expected_len]);
+        pos += len; // Advance the position in the slice to the start of next chunk
         // Note that a padding byte is added if len is odd, meaning we have to advance the position by 1 extra.
         if (len % 2) != 0 {
             pos += 1;
@@ -247,7 +270,7 @@ fn read_data_at(data: &[u8], pos: usize, len: usize) -> (usize, Result<&[u8], Ri
         Err(RiffError::UnexpectedEndOfData(
             pos - 4, // To get to starting index of length specifier
             len.try_into().unwrap(),
-            data.len() - (pos + len),
+            data.len() - pos, // Remaining data after 
         )),
     );
 }
